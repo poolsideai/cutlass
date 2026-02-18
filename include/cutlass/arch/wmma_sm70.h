@@ -1,5 +1,5 @@
 /***************************************************************************************************
- * Copyright (c) 2017 - 2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2017 - 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: BSD-3-Clause
  *
  * Redistribution and use in source and binary forms, with or without
@@ -33,11 +33,9 @@
 */
 
 #pragma once
-
-#if defined(__CUDACC_RTC__)
-#include <cuda/std/cassert>
-#else
-#include <assert.h>
+#include "cutlass/cutlass.h"
+#ifndef __QNX__
+#include CUDA_STD_HEADER(cassert)
 #endif
 #include "cutlass/layout/matrix.h"
 
@@ -127,7 +125,7 @@ struct Wmma<
       nvcuda::wmma::mma_sync(D, A, B, C);
   }
 #else
-    static_assert(false, "wmma.mma.sync for floating point multiplicands is avialable only for SM70 and beyond");
+    static_assert(false, "wmma.mma.sync for floating point multiplicands is available only for SM70 and beyond");
 #endif
 
 };

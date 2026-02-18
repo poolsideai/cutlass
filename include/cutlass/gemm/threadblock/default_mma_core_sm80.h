@@ -1,5 +1,5 @@
 /***************************************************************************************************
- * Copyright (c) 2017 - 2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2017 - 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: BSD-3-Clause
  *
  * Redistribution and use in source and binary forms, with or without
@@ -38,7 +38,7 @@
    instructions.
 
       SM80 Multi stage kernel expects stage number to be larger or equal to 3
-   to use asyncronous copy.
+   to use asynchronous copy.
 */
 
 #pragma once
@@ -57,6 +57,7 @@
 #include "cutlass/gemm/threadblock/default_mma_core.h"
 #include "cutlass/gemm/threadblock/default_multistage_mma_complex_core.h"
 #include "cutlass/gemm/threadblock/default_multistage_mma_complex_core_sm80.h"
+#include "cutlass/gemm/threadblock/mma_multistage_blockwise.h"
 
 #include "cutlass/matrix_shape.h"
 #include "cutlass/numeric_types.h"
@@ -1285,16 +1286,32 @@ struct DefaultMmaCore<Shape_, WarpShape_, InstructionShape_, ElementA_,
   /// Default Operator
   using Operator = Operator_;
 
+  // Warp thread arrangement
+  static int const kWarpThreadArrangementContiguousA =
+      platform::min(Shape::kM / (kAccessSizeInBits / sizeof_bits<ElementA>::value), 8);
+
+  static int const kWarpThreadArrangementStridedA =
+      kWarpSize / kWarpThreadArrangementContiguousA;
+
+  static int const kWarpThreadArrangementContiguousB =
+      platform::min(Shape::kN / (kAccessSizeInBits / sizeof_bits<ElementB>::value), 8);
+
+  static int const kWarpThreadArrangementStridedB =
+      kWarpSize / kWarpThreadArrangementContiguousB;
+
   //
   // Shared memory layouts
   //
-
+  static int const Crosswise_A = platform::min(int(128 / sizeof(ElementA)),
+                                               Shape::kM);
   using SmemLayoutA = layout::ColumnMajorTensorOpMultiplicandCongruous<
-      sizeof_bits<ElementA>::value, int(128 / sizeof(ElementA))>;
+      sizeof_bits<ElementA>::value, Crosswise_A>;
 
   // Shared memory layout
+  static int const Crosswise_B = platform::min(int(128 / sizeof(ElementB)),
+                                               Shape::kN);
   using SmemLayoutB = layout::RowMajorTensorOpMultiplicandCongruous<
-      sizeof_bits<ElementB>::value, int(128 / sizeof(ElementB))>;
+      sizeof_bits<ElementB>::value, Crosswise_B>;
 
   //
   // Iterators to write to shared memory
@@ -1303,7 +1320,8 @@ struct DefaultMmaCore<Shape_, WarpShape_, InstructionShape_, ElementA_,
   /// ThreadMap of iterator A
   using IteratorThreadMapA = transform::PitchLinearWarpRakedThreadMap<
       layout::PitchLinearShape<Shape::kM, Shape::kK>, kThreads,
-      layout::PitchLinearShape<8, 4>,
+      layout::PitchLinearShape<kWarpThreadArrangementContiguousA,
+                               kWarpThreadArrangementStridedA>,
       kAccessSizeInBits / sizeof_bits<ElementA>::value>;
 
   /// Shared memory iterator to A operand
@@ -1314,7 +1332,8 @@ struct DefaultMmaCore<Shape_, WarpShape_, InstructionShape_, ElementA_,
   /// ThreadMap of iterator B
   using IteratorThreadMapB = transform::PitchLinearWarpRakedThreadMap<
       layout::PitchLinearShape<Shape::kN, Shape::kK>, kThreads,
-      layout::PitchLinearShape<8, 4>,
+      layout::PitchLinearShape<kWarpThreadArrangementContiguousB,
+                               kWarpThreadArrangementStridedB>,
       kAccessSizeInBits / sizeof_bits<ElementB>::value>;
 
   /// Shared memory iterator to B operand
@@ -1549,6 +1568,12 @@ struct DefaultMmaCore<Shape_, WarpShape_, InstructionShape_, ElementA_,
   using Operator = Operator_;
 
   // Warp thread arrangement
+  static int const kWarpThreadArrangementContiguousA =
+      platform::min(Shape::kM / (kAccessSizeInBits / sizeof_bits<ElementA>::value), 8);
+
+  static int const kWarpThreadArrangementStridedA =
+      kWarpSize / kWarpThreadArrangementContiguousA;
+
   static int const kWarpThreadArrangementContiguousB =
       Shape::kK / (kAccessSizeInBits / sizeof_bits<ElementA>::value);
 
@@ -1558,9 +1583,10 @@ struct DefaultMmaCore<Shape_, WarpShape_, InstructionShape_, ElementA_,
   //
   // Shared memory layouts
   //
-
+  static int const Crosswise_A = platform::min(int(128 / sizeof(ElementA)),
+                                               Shape::kM);
   using SmemLayoutA = layout::ColumnMajorTensorOpMultiplicandCongruous<
-      sizeof_bits<ElementA>::value, int(128 / sizeof(ElementA))>;
+      sizeof_bits<ElementA>::value, Crosswise_A>;
 
   // Shared memory layout
   using SmemLayoutB = layout::ColumnMajorTensorOpMultiplicandCrosswise<
@@ -1573,7 +1599,8 @@ struct DefaultMmaCore<Shape_, WarpShape_, InstructionShape_, ElementA_,
   /// ThreadMap of iterator A
   using IteratorThreadMapA = transform::PitchLinearWarpRakedThreadMap<
       layout::PitchLinearShape<Shape::kM, Shape::kK>, kThreads,
-      layout::PitchLinearShape<8, 4>,
+      layout::PitchLinearShape<kWarpThreadArrangementContiguousA,
+                               kWarpThreadArrangementStridedA>,
       kAccessSizeInBits / sizeof_bits<ElementA>::value>;
 
   /// Shared memory iterator to A operand
@@ -1686,6 +1713,12 @@ struct DefaultMmaCore<Shape_, WarpShape_, InstructionShape_, ElementA_,
   static int const kWarpThreadArrangementStridedA =
       kWarpSize / kWarpThreadArrangementContiguousA;
 
+  static int const kWarpThreadArrangementContiguousB =
+      platform::min(Shape::kN / (kAccessSizeInBits / sizeof_bits<ElementB>::value), 8);
+
+  static int const kWarpThreadArrangementStridedB =
+      kWarpSize / kWarpThreadArrangementContiguousB;
+
   //
   // Shared memory layouts
   //
@@ -1694,8 +1727,10 @@ struct DefaultMmaCore<Shape_, WarpShape_, InstructionShape_, ElementA_,
       sizeof_bits<ElementA>::value, Shape::kK>;
 
   // Shared memory layout
+  static int const Crosswise_B = platform::min(int(128 / sizeof(ElementB)),
+                                               Shape::kN);
   using SmemLayoutB = layout::RowMajorTensorOpMultiplicandCongruous<
-      sizeof_bits<ElementB>::value, int(128 / sizeof(ElementB))>;
+      sizeof_bits<ElementB>::value, Crosswise_B>;
 
   //
   // Iterators to write to shared memory
@@ -1716,7 +1751,8 @@ struct DefaultMmaCore<Shape_, WarpShape_, InstructionShape_, ElementA_,
   /// ThreadMap of iterator B
   using IteratorThreadMapB = transform::PitchLinearWarpRakedThreadMap<
       layout::PitchLinearShape<Shape::kN, Shape::kK>, kThreads,
-      layout::PitchLinearShape<8, 4>,
+      layout::PitchLinearShape<kWarpThreadArrangementContiguousB,
+                               kWarpThreadArrangementStridedB>,
       kAccessSizeInBits / sizeof_bits<ElementB>::value>;
 
   /// Shared memory iterator to B operand
