@@ -265,7 +265,7 @@ struct Sm100EpilogueOpNumAccumulatorMtxs<EpilogueOp, cute::void_t<decltype(Epilo
 
 
 // Wrapper class to use operator-style epilogues in sm90 TMA warp-specialized kernels
-template <class EpilogueOp>
+template <class EpilogueOp, bool NeedsTensorMapStorage = true>
 class Sm90TmaWarpSpecializedAdapter : public EpilogueOp {
 public:
   using GmemTiledCopyC = void;
@@ -280,7 +280,12 @@ public:
   using StorePipelineState = cutlass::PipelineState<0>;
 
   using TensorStorage = typename EpilogueOp::SharedStorage;
-  using TensorMapStorage = typename EpilogueOp::SharedStorage;
+  struct DummyTensorMapStorage{};
+  using TensorMapStorage = cute::conditional_t<
+    NeedsTensorMapStorage,
+    typename EpilogueOp::SharedStorage,
+    DummyTensorMapStorage
+  >;
   using PipelineStorage = typename LoadPipeline::SharedStorage;
 
   template<class CtaTileMNK>
