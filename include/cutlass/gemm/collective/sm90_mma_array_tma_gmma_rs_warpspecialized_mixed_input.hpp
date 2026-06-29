@@ -612,14 +612,16 @@ public:
           const int scale_k = ceil_div(K, args.chunk_size);
           constexpr int min_tma_aligned_elements_scale = tma_alignment_bits / cutlass::sizeof_bits<ElementScale>::value;
           implementable = implementable && cutlass::detail::check_alignment<min_tma_aligned_elements_scale>(cute::make_shape(scale_mn,scale_k,L), StrideScale{});
-          implementable = implementable && args.chunk_size != 0;
-          if (args.chunk_size != 0) {
-            implementable = implementable &&
-                (args.chunk_size == K ||
-                 ((args.chunk_size % size<2>(TileShape{})) == 0) ||
-                 (UseNvfp4Block16Scales &&
-                  ((int(size<2>(TileShape{})) % args.chunk_size) == 0)));
-          }
+          constexpr int tile_k = int(size<2>(TileShape{}));
+          // chunk_size (scale group) must align to the K tile one of three ways:
+          //   == K (one group over all K), a multiple of the tile (coarse), or
+          //   -- for NVFP4 block-16 scales -- a divisor of the tile (fine).
+          const bool chunk_size_supported =
+              args.chunk_size != 0 &&
+              (args.chunk_size == K ||
+               args.chunk_size % tile_k == 0 ||
+               (UseNvfp4Block16Scales && tile_k % args.chunk_size == 0));
+          implementable = implementable && chunk_size_supported;
           implementable = implementable && (args.ptr_S != nullptr);
           if constexpr (KernelConversionMode == ConversionMode::ConvertAndScale) {
             implementable = implementable && (args.ptr_Z == nullptr);
