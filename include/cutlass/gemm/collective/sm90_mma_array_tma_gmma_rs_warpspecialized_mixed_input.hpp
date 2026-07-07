@@ -200,7 +200,17 @@ public:
 
   static constexpr int NumProducerThreadEvents = 1;
 
-  using SmemLayoutAtomScale = Layout<Shape<decltype(cute::shape<0>(SwappedSmemLayoutAtomA{})), cute::Int<1>>>;
+  static constexpr bool UseNvfp4Block16Scales =
+      cute::is_same_v<RealSwappedElementA, cutlass::float_e2m1_t> &&
+      cute::is_same_v<NonVoidElementScale, cutlass::float_e4m3_t> &&
+      ((int(size<2>(TileShape{})) % 16) == 0);
+  using ScaleAtomM =
+      cute::conditional_t<UseNvfp4Block16Scales, cute::Int<16>,
+                          decltype(cute::shape<0>(SwappedSmemLayoutAtomA{}))>;
+  static constexpr int ScaleAtomK =
+      UseNvfp4Block16Scales ? int(size<2>(TileShape{})) / 16 : 1;
+  using SmemLayoutAtomScale =
+      Layout<Shape<ScaleAtomM, cute::Int<ScaleAtomK>>>;
   using ScaleTileShape = decltype(make_shape(shape<0>(TileShape{}), shape<1>(SmemLayoutAtomScale{})));
 
   static_assert(cute::rank(SwappedSmemLayoutAtomA{}) == 2, "SmemLayoutAtom must be rank 2 (M/N, K)");
@@ -234,9 +244,8 @@ public:
   static_assert(cute::is_same_v<GmemTiledCopyB, SM90_TMA_LOAD> || cute::is_same_v<GmemTiledCopyB, SM90_TMA_LOAD_MULTICAST>,
       "GmemTiledCopy - invalid SM90 TMA copy atom specified.");
 
-  // To relax them, we need to handle loading more than 1 row of scales for every main loop iteration.
-  // We must also handle updating the pipeline transaction bytes on the fly.
-  static_assert(size<1>(SmemLayoutAtomScale{}) == 1, "size<1>(SmemLayoutAtomScale) must be 1.");
+  static_assert(size<1>(SmemLayoutAtomScale{}) == 1 || UseNvfp4Block16Scales,
+                "Only NVFP4 block-16 scales may use multiple scale columns per K tile.");
 
 private:
   static constexpr ConversionMode
@@ -378,6 +387,11 @@ public:
       init_M = get<1>(init_shape);
       init_N = get<0>(init_shape);
     }
+    if constexpr (IsGroupedGemmKernel) {
+      init_M = cute::max(init_M, int(size<0>(TileShape{})));
+      init_N = cute::max(init_N, int(size<1>(TileShape{})));
+      init_K = cute::max(init_K, int(size<2>(TileShape{})));
+    }
     // Batches/Groups are managed by using appropriate pointers to input matrices
     const uint32_t mock_L = 1;
     SwappedElementA const* ptr_A_first_batch;
@@ -491,7 +505,9 @@ public:
     else if constexpr (ModeHasScales) {
       auto scale_k = ceil_div(init_K, args.chunk_size);
       ElementScale const* ptr_S = reinterpret_cast<ElementScale const*>(args.ptr_S);
-      StrideScale dS{};
+      StrideScale dS =
+          make_stride(Int<1>{}, static_cast<int64_t>(init_M),
+                      static_cast<int64_t>(init_M) * scale_k);
       Tensor tensor_scale = make_tensor(detail::get_logical_ptr(ptr_S), make_layout(make_shape(init_M,scale_k,mock_L), dS));
       tma_load_scale = make_tma_copy<TmaElementScale>(
           GmemTiledCopyScale{},
@@ -596,8 +612,16 @@ public:
           const int scale_k = ceil_div(K, args.chunk_size);
           constexpr int min_tma_aligned_elements_scale = tma_alignment_bits / cutlass::sizeof_bits<ElementScale>::value;
           implementable = implementable && cutlass::detail::check_alignment<min_tma_aligned_elements_scale>(cute::make_shape(scale_mn,scale_k,L), StrideScale{});
-          implementable = implementable && (args.chunk_size == K || ((args.chunk_size % size<2>(TileShape{})) == 0));
-          implementable = implementable && args.chunk_size != 0;
+          constexpr int tile_k = int(size<2>(TileShape{}));
+          // chunk_size (scale group) must align to the K tile one of three ways:
+          //   == K (one group over all K), a multiple of the tile (coarse), or
+          //   -- for NVFP4 block-16 scales -- a divisor of the tile (fine).
+          const bool chunk_size_supported =
+              args.chunk_size != 0 &&
+              (args.chunk_size == K ||
+               args.chunk_size % tile_k == 0 ||
+               (UseNvfp4Block16Scales && tile_k % args.chunk_size == 0));
+          implementable = implementable && chunk_size_supported;
           implementable = implementable && (args.ptr_S != nullptr);
           if constexpr (KernelConversionMode == ConversionMode::ConvertAndScale) {
             implementable = implementable && (args.ptr_Z == nullptr);

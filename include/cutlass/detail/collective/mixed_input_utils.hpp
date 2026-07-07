@@ -553,6 +553,35 @@ private:
   static constexpr auto KernelConversionMode = Collective::KernelConversionMode;
   static constexpr auto ModeHasScales = Collective::ModeHasScales;
   static constexpr auto UseScaleLookupTable = Collective::UseScaleLookupTable;
+  static constexpr bool UseNvfp4Block16ScaleBroadcast =
+      cute::is_same_v<RealSwappedElementA, cutlass::float_e2m1_t> &&
+      cute::is_same_v<ElementScale, cutlass::float_e4m3_t> &&
+      (int(size<1>(SmemLayoutScale{})) > 1);
+
+  static constexpr auto
+  get_mma_smem_layout_scale() {
+    if constexpr (UseNvfp4Block16ScaleBroadcast) {
+      auto compact_layout = SmemLayoutScale{};
+      constexpr int ScaleK = int(size<1>(SmemLayoutScale{}));
+      static_assert(int(size<0>(SmemLayoutScale{})) % 16 == 0,
+                    "NVFP4 scale broadcast assumes 16-row scale atoms.");
+      auto compact_k_stride =
+          compact_layout(_0{}, _1{}, _0{}) - compact_layout(_0{}, _0{}, _0{});
+      auto broadcast_layout = make_layout(
+        make_shape(shape<0>(compact_layout),
+                   make_shape(Int<16>{}, Int<ScaleK>{}),
+                   shape<2>(compact_layout)),
+        make_stride(stride<0>(compact_layout),
+                    make_stride(Int<0>{}, compact_k_stride),
+                    stride<2>(compact_layout)));
+      static_assert(cute::cosize_v<decltype(broadcast_layout)> ==
+                    cute::cosize_v<SmemLayoutScale>);
+      return broadcast_layout;
+    }
+    else {
+      return SmemLayoutScale{};
+    }
+  }
 
 public:
   static constexpr auto
@@ -664,8 +693,14 @@ public:
 
     copy(smem_tiled_copy_A, tCsA(_,_,k_block,read_stage), tCrA_copy_view(_,_,k_block));
 
-    if (k_block == 0) {
-      // We are starting a new k-tile so copy the scale
+    bool copy_extra_inputs = k_block == 0;
+    if constexpr (size<1>(SmemLayoutScale{}) != 1) {
+      copy_extra_inputs = true;
+    }
+
+    if (copy_extra_inputs) {
+      // One-scale-per-tile kernels only refresh at the first GMMA k-block.
+      // NVFP4 block-16 kernels use a broadcast MMA view over compact scale columns.
       if constexpr (KernelConversionMode == ConversionMode::DirectConvert) {
         // nothing to do
       }
@@ -862,7 +897,7 @@ public:
     }
     else if constexpr (UseScaleLookupTable) {
       constexpr int num_elements = decltype(size(src))::value;
-      static_assert(is_same_v<RealSwappedElementA, cutlass::int4b_t> || is_same_v<RealSwappedElementA, cutlass::float_e2m1_t>, 
+      static_assert(is_same_v<RealSwappedElementA, cutlass::int4b_t> || is_same_v<RealSwappedElementA, cutlass::float_e2m1_t>,
                     "Lookup table supports int4b_t (Two's Complement) and float_e2m1_t (E2M1/FP4) quant types.");
       static_assert(sizeof_bits_v<ElementScale> == 64, "Lookup table only supports 8 8bit scale values now.");
       static_assert(num_elements % 4 == 0 && num_elements >= 4, "Lookup table requires a vector size of 4x when converting.");
@@ -886,7 +921,7 @@ public:
         {
           auto&& scale_neg_ = reinterpret_cast<cutlass::Array<uint32_t, 2> const&>(scales_neg_vm_(i));
           auto&& scale_pos_ = reinterpret_cast<cutlass::Array<uint32_t, 2>      &>(scales_pos_vm_(i));
-          
+
           // Accept CUTLASS pseudo-FP as well
           if constexpr (cutlass::platform::is_floating_point<RealSwappedElementA>::value ||
                         cute::is_same_v<RealSwappedElementA, cutlass::float_e2m1_t>) {
@@ -1022,7 +1057,7 @@ public:
     Tensor dst_vm = cute::group_modes<1,-1>(cute::zipped_divide(dst, pack));
 
     cute::transform(src_arr, dst_arr, Converter::convert);
-    
+
     if constexpr (ModeHasScales) {
 
       auto const& scales = cute::get<1>(partitioned_extra_info)(_,_,_,k_block);
@@ -1154,7 +1189,7 @@ public:
       return cute::make_tuple();
     }
     else if constexpr (UseScaleLookupTable) {
-      Tensor sS = make_tensor(make_smem_ptr(shared_tensors.smem_scale.begin()), SmemLayoutScale{});// (BLK_M,BLK_SCALE_K,PIPE)
+      Tensor sS = make_tensor(make_smem_ptr(shared_tensors.smem_scale.begin()), get_mma_smem_layout_scale());// (BLK_M,BLK_SCALE_K,PIPE)
       Tensor tCsS = mma_thread_slice.partition_A(sS);
       Tensor tCrS_neg = make_tensor<ElementScale>(mma_thread_slice.partition_fragment_A(sS(_,_,Int<0>{})).layout());
       Tensor tCrS_pos = make_tensor<ElementScale>(mma_thread_slice.partition_fragment_A(sS(_,_,Int<0>{})).layout());
@@ -1164,7 +1199,7 @@ public:
       }
     }
     else if constexpr (ModeHasScales) {
-      Tensor sS = make_tensor(make_smem_ptr(shared_tensors.smem_scale.begin()), SmemLayoutScale{});// (BLK_M,BLK_SCALE_K,PIPE)
+      Tensor sS = make_tensor(make_smem_ptr(shared_tensors.smem_scale.begin()), get_mma_smem_layout_scale());// (BLK_M,BLK_SCALE_K,PIPE)
       Tensor tCsS = mma_thread_slice.partition_A(sS);
       Tensor tCrS = make_tensor<ElementScale>(mma_thread_slice.partition_fragment_A(sS(_,_,Int<0>{})).layout());
 
@@ -1172,7 +1207,7 @@ public:
         return cute::make_tuple(tCsS, tCrS);
       }
       else if constexpr (KernelConversionMode == ConversionMode::ConvertAndScaleWithZero) {
-        Tensor sZ = make_tensor(make_smem_ptr(shared_tensors.smem_zero.begin()), SmemLayoutScale{});// (BLK_M,BLK_SCALE_K,PIPE)
+        Tensor sZ = make_tensor(make_smem_ptr(shared_tensors.smem_zero.begin()), get_mma_smem_layout_scale());// (BLK_M,BLK_SCALE_K,PIPE)
         Tensor tCsZ = mma_thread_slice.partition_A(sZ);
         Tensor tCrZ = make_tensor<ElementZero>(mma_thread_slice.partition_fragment_A(sZ(_,_,Int<0>{})).layout());
         return cute::make_tuple(tCsS, tCrS, tCsZ, tCrZ);
